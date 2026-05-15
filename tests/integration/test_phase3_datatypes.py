@@ -672,7 +672,7 @@ class TestStructBitfield:
         struct_name = self._make_struct(http_client)
         response = http_client.post(
             "/add_struct_bitfield",
-            data={
+            json_data={
                 "struct_name": struct_name,
                 "base_type": "uint",
                 "byte_offset": 4,
@@ -695,7 +695,7 @@ class TestStructBitfield:
         struct_name = self._make_struct(http_client)
         http_client.post(
             "/add_struct_bitfield",
-            data={
+            json_data={
                 "struct_name": struct_name,
                 "base_type": "uint",
                 "byte_offset": 4,
@@ -717,7 +717,7 @@ class TestStructBitfield:
         """Adding to a missing struct returns an error."""
         response = http_client.post(
             "/add_struct_bitfield",
-            data={
+            json_data={
                 "struct_name": f"NoSuch_{uuid.uuid4().hex[:8]}",
                 "base_type": "uint",
                 "byte_offset": 0,
@@ -736,7 +736,7 @@ class TestStructBitfield:
         struct_name = self._make_struct(http_client)
         response = http_client.post(
             "/add_struct_bitfield",
-            data={
+            json_data={
                 "struct_name": struct_name,
                 "base_type": "byte",
                 "byte_offset": 4,
@@ -755,7 +755,7 @@ class TestStructBitfield:
         struct_name = self._make_struct(http_client)
         response = http_client.post(
             "/add_struct_bitfield",
-            data={
+            json_data={
                 "struct_name": struct_name,
                 "base_type": "uint",
                 "byte_offset": 4,
@@ -775,7 +775,7 @@ class TestStructBitfield:
         # byte_offset 0 overlaps the 4-byte 'header' field.
         response = http_client.post(
             "/add_struct_bitfield",
-            data={
+            json_data={
                 "struct_name": struct_name,
                 "base_type": "uint",
                 "byte_offset": 0,
@@ -786,3 +786,41 @@ class TestStructBitfield:
         )
         assert response.status_code == 200
         assert is_error_response(response.text)
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_add_bitfield_shared_word(self, http_client):
+        """Multiple bitfields pack into one shared storage word at the same byte_offset."""
+        struct_name = self._make_struct(http_client)
+        first = http_client.post(
+            "/add_struct_bitfield",
+            json_data={
+                "struct_name": struct_name,
+                "base_type": "uint",
+                "byte_offset": 4,
+                "bit_offset": 0,
+                "bit_size": 3,
+                "name": "LOW",
+            },
+        )
+        assert json.loads(first.text).get("success") is True
+        second = http_client.post(
+            "/add_struct_bitfield",
+            json_data={
+                "struct_name": struct_name,
+                "base_type": "uint",
+                "byte_offset": 4,
+                "bit_offset": 3,
+                "bit_size": 5,
+                "name": "HIGH",
+            },
+        )
+        body = json.loads(second.text)
+        assert body.get("success") is True
+        assert body["bit_offset"] == 3
+        # Both bitfields visible in the layout
+        layout = http_client.get(
+            "/get_struct_layout", params={"struct_name": struct_name}
+        )
+        assert "0:3" in layout.text
+        assert "3:5" in layout.text
