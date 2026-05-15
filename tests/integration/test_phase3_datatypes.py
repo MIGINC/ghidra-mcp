@@ -824,3 +824,35 @@ class TestStructBitfield:
         )
         assert "0:3" in layout.text
         assert "3:5" in layout.text
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_add_bitfield_bit_range_overlap(self, http_client):
+        """Two bitfields in the same word with overlapping bit ranges is rejected."""
+        struct_name = self._make_struct(http_client)
+        first = http_client.post(
+            "/add_struct_bitfield",
+            json_data={
+                "struct_name": struct_name,
+                "base_type": "uint",
+                "byte_offset": 4,
+                "bit_offset": 0,
+                "bit_size": 3,
+                "name": "LOW",
+            },
+        )
+        assert json.loads(first.text).get("success") is True
+        # bits [2, 6) overlap LOW's bits [0, 3) at bit 2
+        clash = http_client.post(
+            "/add_struct_bitfield",
+            json_data={
+                "struct_name": struct_name,
+                "base_type": "uint",
+                "byte_offset": 4,
+                "bit_offset": 2,
+                "bit_size": 4,
+                "name": "CLASH",
+            },
+        )
+        assert clash.status_code == 200
+        assert is_error_response(clash.text)
