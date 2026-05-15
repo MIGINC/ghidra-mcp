@@ -1698,8 +1698,24 @@ public class DataTypeService {
                         }
                     }
 
+                    int oldLength = struct.getLength();
                     DataTypeComponent comp = struct.insertBitFieldAt(
                         byteOffset, byteWidth, bitOffset, baseType, bitSize, name, finalComment);
+
+                    // insertBitFieldAt never fails on a bit-range conflict: it silently relocates
+                    // the bitfield into a freshly inserted storage word, shifting later members.
+                    // A clean placement grows the struct only far enough to cover the requested
+                    // region; any extra growth means the bitfield did not land where requested.
+                    // Detect that and roll back — explicit placement must be honoured exactly.
+                    int expectedLength = Math.max(oldLength, byteOffset + byteWidth);
+                    if (struct.getLength() > expectedLength) {
+                        responseRef.set(Response.err("Bitfield '" + name + "' could not be placed at byte_offset "
+                            + byteOffset + " bit_offset " + bitOffset + ": the requested location is not free "
+                            + "(the bit range conflicts with an existing bitfield, or the placement would shift "
+                            + "existing members). Choose a free byte_offset, or an existing bitfield storage word "
+                            + "with room for these bits."));
+                        return;  // committed stays false -> transaction rolls back the relocation
+                    }
                     committed = true;
 
                     int placedBitOffset = bitOffset;
