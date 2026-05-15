@@ -648,3 +648,141 @@ class TestPhase3Integration:
             "/get_struct_layout", params={"struct_name": struct_name}
         )
         assert response.status_code == 200
+
+
+class TestStructBitfield:
+    """Test add_struct_bitfield and bitfield read-back in get_struct_layout."""
+
+    def _make_struct(self, http_client):
+        """Create a struct with a 4-byte header field; bitfields go at offset 4+."""
+        struct_name = f"BfStruct_{uuid.uuid4().hex[:8]}"
+        http_client.post(
+            "/create_struct",
+            json_data={
+                "name": struct_name,
+                "fields": [{"name": "header", "type": "uint", "offset": 0}],
+            },
+        )
+        return struct_name
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_add_bitfield_basic(self, http_client):
+        """A bitfield placed in undefined space succeeds and echoes its placement."""
+        struct_name = self._make_struct(http_client)
+        response = http_client.post(
+            "/add_struct_bitfield",
+            data={
+                "struct_name": struct_name,
+                "base_type": "uint",
+                "byte_offset": 4,
+                "bit_offset": 5,
+                "bit_size": 3,
+                "name": "MODE",
+            },
+        )
+        assert response.status_code == 200
+        body = json.loads(response.text)
+        assert body.get("success") is True
+        assert body["name"] == "MODE"
+        assert body["bit_offset"] == 5
+        assert body["bit_size"] == 3
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_bitfield_visible_in_layout(self, http_client):
+        """get_struct_layout shows the Bits column with bit_offset:bit_size."""
+        struct_name = self._make_struct(http_client)
+        http_client.post(
+            "/add_struct_bitfield",
+            data={
+                "struct_name": struct_name,
+                "base_type": "uint",
+                "byte_offset": 4,
+                "bit_offset": 5,
+                "bit_size": 3,
+                "name": "MODE",
+            },
+        )
+        response = http_client.get(
+            "/get_struct_layout", params={"struct_name": struct_name}
+        )
+        assert response.status_code == 200
+        text = response.text
+        assert "Bits" in text
+        assert "5:3" in text
+
+    @pytest.mark.requires_program
+    def test_add_bitfield_nonexistent_struct(self, http_client):
+        """Adding to a missing struct returns an error."""
+        response = http_client.post(
+            "/add_struct_bitfield",
+            data={
+                "struct_name": f"NoSuch_{uuid.uuid4().hex[:8]}",
+                "base_type": "uint",
+                "byte_offset": 0,
+                "bit_offset": 0,
+                "bit_size": 1,
+                "name": "flag",
+            },
+        )
+        assert response.status_code == 200
+        assert is_error_response(response.text)
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_add_bitfield_bit_size_too_large(self, http_client):
+        """bit_size larger than the base type width is rejected."""
+        struct_name = self._make_struct(http_client)
+        response = http_client.post(
+            "/add_struct_bitfield",
+            data={
+                "struct_name": struct_name,
+                "base_type": "byte",
+                "byte_offset": 4,
+                "bit_offset": 0,
+                "bit_size": 9,
+                "name": "toobig",
+            },
+        )
+        assert response.status_code == 200
+        assert is_error_response(response.text)
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_add_bitfield_invalid_name(self, http_client):
+        """A name that is not a valid identifier is rejected."""
+        struct_name = self._make_struct(http_client)
+        response = http_client.post(
+            "/add_struct_bitfield",
+            data={
+                "struct_name": struct_name,
+                "base_type": "uint",
+                "byte_offset": 4,
+                "bit_offset": 0,
+                "bit_size": 2,
+                "name": "1bad",
+            },
+        )
+        assert response.status_code == 200
+        assert is_error_response(response.text)
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_add_bitfield_overlap_rejected(self, http_client):
+        """Placing a bitfield over an existing component is rejected."""
+        struct_name = self._make_struct(http_client)
+        # byte_offset 0 overlaps the 4-byte 'header' field.
+        response = http_client.post(
+            "/add_struct_bitfield",
+            data={
+                "struct_name": struct_name,
+                "base_type": "uint",
+                "byte_offset": 0,
+                "bit_offset": 0,
+                "bit_size": 1,
+                "name": "clash",
+            },
+        )
+        assert response.status_code == 200
+        assert is_error_response(response.text)
