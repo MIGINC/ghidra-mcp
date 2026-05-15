@@ -1678,6 +1678,26 @@ public class DataTypeService {
                         return;
                     }
 
+                    // insertBitFieldAt has insert/shift semantics: a byte_offset colliding with a
+                    // regular field silently relocates that field. Reject that — explicit placement
+                    // should land in free space. Existing bitfield components may be shared (multiple
+                    // bitfields packed into one storage word), so only non-bitfield fields conflict.
+                    int regionEnd = byteOffset + byteWidth;
+                    for (DataTypeComponent existing : struct.getDefinedComponents()) {
+                        if (existing.isBitFieldComponent()) {
+                            continue;
+                        }
+                        int exStart = existing.getOffset();
+                        int exEnd = exStart + existing.getLength();
+                        if (byteOffset < exEnd && exStart < regionEnd) {
+                            responseRef.set(Response.err("Bitfield storage region [" + byteOffset + ", "
+                                + regionEnd + ") overlaps existing field '"
+                                + (existing.getFieldName() != null ? existing.getFieldName() : "(unnamed)")
+                                + "' at offset " + exStart + "; choose a free byte_offset"));
+                            return;
+                        }
+                    }
+
                     DataTypeComponent comp = struct.insertBitFieldAt(
                         byteOffset, byteWidth, bitOffset, baseType, bitSize, name, finalComment);
                     committed = true;
