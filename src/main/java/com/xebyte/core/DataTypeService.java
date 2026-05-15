@@ -288,15 +288,21 @@ public class DataTypeService {
         result.append("Size: ").append(struct.getLength()).append(" bytes\n");
         result.append("Alignment: ").append(struct.getAlignment()).append("\n\n");
         result.append("Layout:\n");
-        result.append("Offset | Size | Type | Name\n");
-        result.append("-------|------|------|-----\n");
+        result.append("Offset | Size | Type | Name | Bits\n");
+        result.append("-------|------|------|------|-----\n");
 
         for (DataTypeComponent component : struct.getDefinedComponents()) {
-            result.append(String.format("%6d | %4d | %-20s | %s\n",
+            String bits = "";
+            if (component.isBitFieldComponent()
+                    && component.getDataType() instanceof BitFieldDataType bf) {
+                bits = bf.getBitOffset() + ":" + bf.getBitSize();
+            }
+            result.append(String.format("%6d | %4d | %-20s | %-20s | %s\n",
                 component.getOffset(),
                 component.getLength(),
                 component.getDataType().getName(),
-                component.getFieldName() != null ? component.getFieldName() : "(unnamed)"));
+                component.getFieldName() != null ? component.getFieldName() : "(unnamed)",
+                bits));
         }
 
         return Response.text(result.toString());
