@@ -1,7 +1,7 @@
 {
   "version": "5.10.0",
   "description": "GhidraMCP REST API Endpoint Specification",
-  "total_endpoints": 244,
+  "total_endpoints": 245,
   "categories": {
     "listing": "List program data",
     "getter": "Get specific data",
@@ -2613,6 +2613,22 @@
         "program"
       ],
       "description": "Validate function prototype"
+    },
+    {
+      "path": "/add_struct_bitfield",
+      "method": "POST",
+      "category": "datatype",
+      "params": [
+        "struct_name",
+        "base_type",
+        "byte_offset",
+        "bit_offset",
+        "bit_size",
+        "name",
+        "comment",
+        "program"
+      ],
+      "description": "Add an explicitly-placed bitfield member to a non-packed structure"
     }
   ]
 }

@@ -1578,6 +1578,133 @@ public class DataTypeService {
         return addStructField(structName, fieldName, fieldType, offset, null);
     }
 
+    /** Valid-identifier check for bitfield member names (light validation, no prefix policy). */
+    private static final Pattern BITFIELD_NAME_PATTERN = Pattern.compile("^[A-Za-z_][A-Za-z0-9_]*$");
+
+    /**
+     * Add an explicitly-placed bitfield member to a non-packed structure.
+     * Wraps Structure.insertBitFieldAt; the storage byte width is derived from
+     * the base type, so the caller supplies only byte/bit offsets and bit size.
+     */
+    @McpTool(path = "/add_struct_bitfield", method = "POST",
+            description = "Add an explicitly-placed bitfield member to a non-packed structure. Caller gives the exact byte_offset, bit_offset, and bit_size; storage width is derived from base_type. Use for hardware-register and flag structs so the decompiler can recover bitfields by name.",
+            category = "datatype")
+    public Response addStructBitfield(
+            @Param(value = "struct_name", source = ParamSource.BODY) String structName,
+            @Param(value = "base_type", source = ParamSource.BODY) String baseTypeName,
+            @Param(value = "byte_offset", source = ParamSource.BODY, defaultValue = "-1") int byteOffset,
+            @Param(value = "bit_offset", source = ParamSource.BODY, defaultValue = "-1") int bitOffset,
+            @Param(value = "bit_size", source = ParamSource.BODY, defaultValue = "-1") int bitSize,
+            @Param(value = "name", source = ParamSource.BODY) String name,
+            @Param(value = "comment", source = ParamSource.BODY, defaultValue = "") String comment,
+            @Param(value = "program", description = "Target program name", defaultValue = "") String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+
+        if (structName == null || structName.isEmpty()) return Response.err("Structure name is required");
+        if (baseTypeName == null || baseTypeName.isEmpty()) return Response.err("base_type is required");
+        if (name == null || name.isEmpty()) return Response.err("Bitfield name is required");
+        if (!BITFIELD_NAME_PATTERN.matcher(name).matches()) {
+            return Response.err("Invalid bitfield name '" + name
+                + "': must be a valid identifier ([A-Za-z_][A-Za-z0-9_]*)");
+        }
+        if (byteOffset < 0) return Response.err("byte_offset is required and must be >= 0");
+        if (bitOffset < 0) return Response.err("bit_offset is required and must be >= 0");
+        if (bitSize < 1) return Response.err("bit_size is required and must be >= 1");
+
+        final String finalComment = (comment == null) ? "" : comment;
+        AtomicReference<Response> responseRef = new AtomicReference<>();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Add struct bitfield");
+                boolean committed = false;
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    DataType dataType = ServiceUtils.findDataTypeByNameInAllCategories(dtm, structName);
+                    if (dataType == null) {
+                        responseRef.set(Response.err("Structure not found: " + structName));
+                        return;
+                    }
+                    if (!(dataType instanceof Structure)) {
+                        responseRef.set(Response.err("Data type '" + structName + "' is not a structure"));
+                        return;
+                    }
+                    Structure struct = (Structure) dataType;
+                    if (struct.isPackingEnabled()) {
+                        responseRef.set(Response.err("Structure '" + structName
+                            + "' has packing enabled; add_struct_bitfield supports non-packed structures only"));
+                        return;
+                    }
+
+                    DataType baseType = ServiceUtils.resolveDataType(dtm, baseTypeName);
+                    if (baseType == null) {
+                        responseRef.set(Response.err("base_type not found: " + baseTypeName));
+                        return;
+                    }
+                    DataType probe = baseType;
+                    int typedefGuard = 0;
+                    while (probe instanceof TypeDef && typedefGuard++ < 64) {
+                        probe = ((TypeDef) probe).getBaseDataType();
+                    }
+                    if (!(probe instanceof AbstractIntegerDataType)) {
+                        responseRef.set(Response.err("base_type '" + baseTypeName
+                            + "' is not an integer type; bitfields require an integer base type"));
+                        return;
+                    }
+
+                    int byteWidth = baseType.getLength();
+                    if (byteWidth <= 0) {
+                        responseRef.set(Response.err("base_type '" + baseTypeName
+                            + "' has no fixed storage size and cannot back a bitfield"));
+                        return;
+                    }
+                    int maxBits = byteWidth * 8;
+                    if (bitSize > maxBits) {
+                        responseRef.set(Response.err("bit_size " + bitSize + " exceeds base type width ("
+                            + maxBits + " bits for " + baseTypeName + ")"));
+                        return;
+                    }
+                    if (bitOffset + bitSize > maxBits) {
+                        responseRef.set(Response.err("bit_offset " + bitOffset + " + bit_size " + bitSize
+                            + " exceeds base type width (" + maxBits + " bits)"));
+                        return;
+                    }
+
+                    DataTypeComponent comp = struct.insertBitFieldAt(
+                        byteOffset, byteWidth, bitOffset, baseType, bitSize, name, finalComment);
+                    committed = true;
+
+                    int placedBitOffset = bitOffset;
+                    if (comp.getDataType() instanceof BitFieldDataType bf) {
+                        placedBitOffset = bf.getBitOffset();
+                    }
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("success", true);
+                    data.put("struct", structName);
+                    data.put("name", name);
+                    data.put("byte_offset", comp.getOffset());
+                    data.put("bit_offset", placedBitOffset);
+                    data.put("bit_size", bitSize);
+                    data.put("base_type", baseTypeName);
+                    data.put("bitfield_type", comp.getDataType().getName());
+                    data.put("struct_length", struct.getLength());
+                    responseRef.set(Response.ok(data));
+                } catch (Exception e) {
+                    responseRef.set(Response.err("Error adding bitfield: " + e.getMessage()));
+                } finally {
+                    program.endTransaction(tx, committed);
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            return Response.err("Failed to execute bitfield addition on Swing thread: " + e.getMessage());
+        }
+
+        Response r = responseRef.get();
+        return r != null ? r : Response.err("Bitfield addition produced no response");
+    }
+
     /**
      * Remove a field from an existing structure
      */
