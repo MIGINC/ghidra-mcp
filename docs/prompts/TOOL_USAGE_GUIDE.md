@@ -197,6 +197,7 @@ XREF COUNT: 2 references
 **For structure creation:**
 - `create_struct(name, fields)` - Create a new structure type
 - `modify_struct_field(struct_name, field_name, new_type, new_name)` - Update fields
+- `add_struct_bitfield(struct_name, base_type, byte_offset, bit_offset, bit_size, name, comment)` - Add an explicitly-placed bitfield member to a non-packed struct (hardware registers / flag words); `base_type` is the integer type the bits are carved from, storage width is derived from it. Verify placement with `get_struct_layout` (the `Bits` column reports `bit_offset:bit_size`). Once applied to data, the decompiler renders bitfield accesses by name.
 - `search_data_types(pattern)` - Search for structures by name pattern
 
 **For analysis:**

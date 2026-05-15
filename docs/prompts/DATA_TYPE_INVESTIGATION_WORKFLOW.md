@@ -249,6 +249,8 @@ fields = [
 create_struct("UnitAny", fields)
 ```
 
+**Bitfield members.** When a struct field is a packed set of flags or a hardware register, define the individual bits with `add_struct_bitfield` instead of leaving a raw integer. Give the exact `byte_offset`, `bit_offset`, and `bit_size` for each bit discovered from the datasheet or from shift/mask patterns in the decompiler. The struct must be non-packed. After placing bitfields, confirm them with `get_struct_layout` — the `Bits` column shows `bit_offset:bit_size`.
+
 #### 5.3 Verify Structure Size
 
 Confirm total structure size matches expected allocation or stride:
