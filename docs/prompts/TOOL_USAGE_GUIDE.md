@@ -176,7 +176,7 @@ XREF COUNT: 2 references
 3. `set_decompiler_comment()` with documentation
 
 ### For Structures
-1. `create_struct()` to define the structure with fields
+1. `define_struct()` when the full layout (including bitfields) is known — builds the complete struct in one call. Fall back to `create_struct()` when building the layout incrementally.
 2. `apply_data_type()` with structure name
 3. `rename_or_label()` with descriptive instance name
 4. `modify_struct_field()` if fields need renaming/type changes
@@ -198,9 +198,21 @@ XREF COUNT: 2 references
 - `create_struct(name, fields)` - Create a new structure type
 - `modify_struct_field(struct_name, field_name, new_type, new_name)` - Update fields
 - `add_struct_bitfield(struct_name, base_type, byte_offset, bit_offset, bit_size, name, comment)` - Add an explicitly-placed bitfield member to a non-packed struct (hardware registers / flag words); `base_type` is the integer type the bits are carved from, storage width is derived from it. Verify placement with `get_struct_layout` (the `Bits` column reports `bit_offset:bit_size`). Once applied to data, the decompiler renders bitfield accesses by name.
+- `define_struct(name, layout, packed=false, program)` - Build a complete struct in one call from a JSON `layout` array. Each entry is a plain field `{name, type, offset?}`, a bitfield `{name, base_type, byte_offset, bit_offset, bit_size}`, or a gap `{offset?, size}` — kind inferred automatically, or set explicitly with `kind`. Use instead of `create_struct` + repeated `add_struct_bitfield` whenever the full layout is known up front; it avoids the delete-and-rebuild dance for bitfield regions. Worked example (uint field, 3-bit flag, 4-byte gap, nested struct):
+  ```python
+  define_struct("IoStatusBlock", layout=[
+      {"name": "dwId",   "type": "uint",  "offset": 0},
+      {"name": "FLAGS",  "base_type": "uint", "byte_offset": 4, "bit_offset": 0, "bit_size": 3},
+      {"offset": 8, "size": 4},
+      {"name": "child",  "type": "ChildStruct", "offset": 12},
+  ])
+  # → {success: true, struct: "IoStatusBlock", length: 16}
+  ```
+- `clear_struct_field(struct_name, field_name, program)` - Clear a field to undefined bytes **without** shifting later fields (unlike `remove_struct_field`, which compacts). Use to reserve a field's byte region before placing bitfields there with `add_struct_bitfield`. Not valid on packed structs or bitfield components.
 - `search_data_types(pattern)` - Search for structures by name pattern
 
 **For analysis:**
+- `describe_address(address, program)` - One call returns the data type, primary symbol, size, xref count, and (for pointers) the resolved pointer target at an address. Use instead of reconstructing metadata from raw `read_memory` bytes. Returns `{address, symbol, data_type, size, xref_count}` plus an optional `pointer_target: {address, symbol, data_type}` when the address holds a pointer.
 - `analyze_data_region(address)` - Get data type and boundaries
 - `inspect_memory_content(address, length)` - Read raw memory
 - `get_bulk_xrefs(addresses)` - Get cross-references

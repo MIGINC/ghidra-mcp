@@ -251,6 +251,10 @@ create_struct("UnitAny", fields)
 
 **Bitfield members.** When a struct field is a packed set of flags or a hardware register, define the individual bits with `add_struct_bitfield` instead of leaving a raw integer. Give the exact `byte_offset`, `bit_offset`, and `bit_size` for each bit discovered from the datasheet or from shift/mask patterns in the decompiler. The struct must be non-packed. After placing bitfields, confirm them with `get_struct_layout` — the `Bits` column shows `bit_offset:bit_size`.
 
+**Prefer `define_struct` when the full layout is known up front.** If you already know all fields — including bitfield regions — use `define_struct(name, layout)` with a single `layout` array instead of `create_struct` + N× `add_struct_bitfield`. It builds the entire struct atomically and avoids the delete-and-rebuild cycle that bitfield placement otherwise requires.
+
+**Mutating an existing struct to host bitfields.** When a struct already exists and you need to convert a plain field into bitfields, use `clear_struct_field(struct_name, field_name)` to clear the field to undefined bytes **without** shifting later fields. Then place the bitfields with `add_struct_bitfield`. Do not use `remove_struct_field` here — it compacts the struct and invalidates all subsequent field offsets.
+
 #### 5.3 Verify Structure Size
 
 Confirm total structure size matches expected allocation or stride:
@@ -422,7 +426,9 @@ Expected size: 12 bytes (3 DWORDs)
 
 5. CREATE STRUCTURE IF NEEDED
    - Build complete field list from offset analysis
-   - create_struct() with proper field types
+   - If full layout (including bitfields) is known: define_struct() with a layout array — atomic, one call
+   - Otherwise: create_struct() with plain fields, then add_struct_bitfield() for bit-packed regions
+   - To convert an existing field to bitfields: clear_struct_field() (non-compacting), then add_struct_bitfield()
    - Verify total size is correct
 
 6. APPLY TYPES TO ALL FUNCTIONS
