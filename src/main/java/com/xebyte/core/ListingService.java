@@ -941,14 +941,21 @@ public class ListingService {
         SymbolTable symbolTable = program.getSymbolTable();
 
         Address target = null;
+        Data last = null;
         Data cur = data;
+        // Track visited addresses so a self-referential pointer (common in
+        // IAT stubs / vtable backpointers) stops the walk instead of silently
+        // burning all 8 hops and returning a misleading result.
+        java.util.Set<Address> seen = new java.util.HashSet<>();
+        seen.add(data.getAddress());
         for (int hop = 0; hop < 8; hop++) {
             Object val = cur.getValue();
             if (!(val instanceof Address)) break;
             target = (Address) val;
-            Data next = listing.getDefinedDataAt(target);
-            if (next == null || !(next.getDataType() instanceof Pointer)) break;
-            cur = next;
+            if (!seen.add(target)) break;  // pointer cycle — stop here
+            last = listing.getDefinedDataAt(target);
+            if (last == null || !(last.getDataType() instanceof Pointer)) break;
+            cur = last;
         }
         if (target == null) return null;
 
@@ -956,9 +963,11 @@ public class ListingService {
         tgt.put("address", target.toString());
         Symbol s = symbolTable.getPrimarySymbol(target);
         tgt.put("symbol", s != null ? s.getName() : null);
-        Data targetData = listing.getDefinedDataAt(target);
-        tgt.put("data_type", (targetData != null && targetData.getDataType() != null)
-                ? targetData.getDataType().getName() : null);
+        // `last` is the data at `target` from the final loop iteration —
+        // reuse it rather than re-fetching. Null when the terminal address
+        // is unmapped/undefined, or when the walk stopped on a cycle.
+        tgt.put("data_type", (last != null && last.getDataType() != null)
+                ? last.getDataType().getName() : null);
         return tgt;
     }
 
