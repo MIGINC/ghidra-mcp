@@ -1856,12 +1856,25 @@ public class DataTypeService {
                         return;
                     }
                     Structure struct = (Structure) dataType;
+                    if (struct.isPackingEnabled()) {
+                        responseRef.set(Response.err("Structure '" + structName
+                            + "' has packing enabled; clear_struct_field supports non-packed structures only"));
+                        return;
+                    }
                     int targetOrdinal = -1;
                     int clearedOffset = -1;
                     int clearedLength = -1;
                     for (DataTypeComponent component : struct.getDefinedComponents()) {
                         if (fieldName.equals(component.getFieldName())) {
+                            if (component.isBitFieldComponent()) {
+                                responseRef.set(Response.err("Field '" + fieldName + "' in structure '"
+                                    + structName + "' is a bitfield; clear_struct_field clears plain "
+                                    + "fields only. Use remove_struct_field, or rebuild with define_struct."));
+                                return;
+                            }
                             targetOrdinal = component.getOrdinal();
+                            // Capture offset/length before clearing — these pre-clear
+                            // values are what the caller needs in the response.
                             clearedOffset = component.getOffset();
                             clearedLength = component.getLength();
                             break;
