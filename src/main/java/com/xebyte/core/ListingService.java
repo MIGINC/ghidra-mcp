@@ -541,6 +541,12 @@ public class ListingService {
         // previously returned empty), filtered to global scope. All existing
         // gates below (code-address, section, axis, min_xrefs, substring) are
         // preserved unchanged.
+        // Note: getAllSymbols(true) walks every symbol in the program; the
+        // isGlobal() check below filters to the global namespace immediately.
+        // This is broader than getSymbols(globalNamespace) but is the only way
+        // to reach dynamic auto-generated symbols — an acceptable cost for a
+        // paginated listing tool. Do not "optimize" it back to the narrower
+        // iterator: that reintroduces the dynamic-symbol blind spot.
         SymbolIterator symbols = symbolTable.getAllSymbols(true);
         while (symbols.hasNext()) {
             Symbol symbol = symbols.next();
