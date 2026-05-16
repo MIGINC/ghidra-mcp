@@ -1970,6 +1970,7 @@ public class DataTypeService {
         }
 
         // Resolve types and run kind-independent validation off-transaction.
+        java.util.Set<String> seenMemberNames = new java.util.HashSet<>();
         for (LayoutEntry e : entries) {
             if ("field".equals(e.kind)) {
                 if (e.name == null || e.name.isEmpty() || e.type == null || e.type.isEmpty()) {
@@ -1985,6 +1986,10 @@ public class DataTypeService {
                 }
                 e.resolvedType = dt;
                 e.name = NamingConventions.applyStructFieldNamingPolicy(e.name, e.type);
+                if (!seenMemberNames.add(e.name)) {
+                    return Response.err("layout entry " + e.index
+                        + ": duplicate member name '" + e.name + "'");
+                }
             } else if ("bitfield".equals(e.kind)) {
                 if (e.name == null || e.name.isEmpty()) {
                     return Response.err("layout entry " + e.index + " (bitfield) requires name");
@@ -2022,6 +2027,10 @@ public class DataTypeService {
                         + " exceeds base type width (" + maxBits + " bits)");
                 }
                 e.resolvedType = base;
+                if (!seenMemberNames.add(e.name)) {
+                    return Response.err("layout entry " + e.index
+                        + ": duplicate member name '" + e.name + "'");
+                }
             } else if ("gap".equals(e.kind)) {
                 if (e.size < 1) {
                     return Response.err("layout entry " + e.index + " (gap) requires size >= 1");
@@ -2114,6 +2123,11 @@ public class DataTypeService {
                     for (LayoutEntry e : entries) {
                         if (!"bitfield".equals(e.kind)) continue;
                         int byteWidth = e.resolvedType.getLength();
+                        // The struct is pre-sized to totalSize and fields are placed
+                        // with replaceAtOffset (no growth), so `before` is always
+                        // totalSize here — unlike add_struct_bitfield, which operates
+                        // on a pre-existing struct. The guard below therefore trips
+                        // only when insertBitFieldAt grows the struct past totalSize.
                         int before = struct.getLength();
                         struct.insertBitFieldAt(e.byteOffset, byteWidth, e.bitOffset,
                             e.resolvedType, e.bitSize, e.name,
@@ -2182,6 +2196,10 @@ public class DataTypeService {
             if ("bitfield".equals(e.kind) && e.byteOffset >= 0) {
                 return Response.err("layout entry " + e.index
                     + ": explicit byte_offset is not allowed when packed=true");
+            }
+            if ("bitfield".equals(e.kind) && e.bitOffset >= 0) {
+                return Response.err("layout entry " + e.index
+                    + ": explicit bit_offset is not allowed when packed=true");
             }
         }
         AtomicReference<Response> responseRef = new AtomicReference<>();
