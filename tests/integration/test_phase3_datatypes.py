@@ -977,52 +977,59 @@ class TestClearStructField:
     def test_clear_struct_field_preserves_later_offsets(self, http_client):
         """Clearing a field leaves later fields at their original offsets."""
         struct_name = f"ClrStruct_{uuid.uuid4().hex[:8]}"
+        # Field names are already Hungarian-correct (dw* for uint) so
+        # create_struct's naming policy leaves them unchanged — the field
+        # names below match what clear_struct_field looks up.
         http_client.post(
             "/create_struct",
             json_data={
                 "name": struct_name,
                 "fields": [
-                    {"name": "first", "type": "uint", "offset": 0},
-                    {"name": "middle", "type": "uint", "offset": 4},
-                    {"name": "last", "type": "uint", "offset": 8},
+                    {"name": "dwFirst", "type": "uint", "offset": 0},
+                    {"name": "dwMiddle", "type": "uint", "offset": 4},
+                    {"name": "dwLast", "type": "uint", "offset": 8},
                 ],
             },
         )
         response = http_client.post(
             "/clear_struct_field",
-            json_data={"struct_name": struct_name, "field_name": "middle"},
+            json_data={"struct_name": struct_name, "field_name": "dwMiddle"},
         )
         assert response.status_code == 200
         body = json.loads(response.text)
         assert body.get("success") is True
         assert body["cleared_offset"] == 4
         assert body["cleared_length"] == 4
-        # 'last' must still be at offset 8 (no compaction).
+        # 'dwLast' must still be at offset 8 (no compaction).
         layout = http_client.get(
             "/get_struct_layout", params={"struct_name": struct_name}
         )
         assert layout.status_code == 200
-        assert "last" in layout.text
+        assert "dwLast" in layout.text
 
     @pytest.mark.requires_program
     @pytest.mark.write
     def test_clear_then_place_bitfield(self, http_client):
         """A cleared region accepts a bitfield via add_struct_bitfield."""
         struct_name = f"ClrBf_{uuid.uuid4().hex[:8]}"
+        # dw* names are already Hungarian-correct, so the field names survive
+        # create_struct's naming policy intact for clear_struct_field lookup.
         http_client.post(
             "/create_struct",
             json_data={
                 "name": struct_name,
                 "fields": [
-                    {"name": "head", "type": "uint", "offset": 0},
-                    {"name": "slot", "type": "uint", "offset": 4},
+                    {"name": "dwHead", "type": "uint", "offset": 0},
+                    {"name": "dwSlot", "type": "uint", "offset": 4},
                 ],
             },
         )
-        http_client.post(
+        clear_resp = http_client.post(
             "/clear_struct_field",
-            json_data={"struct_name": struct_name, "field_name": "slot"},
+            json_data={"struct_name": struct_name, "field_name": "dwSlot"},
         )
+        assert clear_resp.status_code == 200
+        assert json.loads(clear_resp.text).get("success") is True
         response = http_client.post(
             "/add_struct_bitfield",
             json_data={
