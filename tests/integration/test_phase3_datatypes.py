@@ -946,6 +946,28 @@ class TestDefineStruct:
         assert response.status_code == 200
         assert is_error_response(response.text)
 
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_define_struct_bitfield_bit_range_conflict_rejected(self, http_client):
+        """Two bitfields in the same storage word with overlapping bit ranges
+        are rejected — the conflict is caught by the post-insert growth guard
+        and the whole define_struct transaction rolls back."""
+        response = http_client.post(
+            "/define_struct",
+            json_data={
+                "name": f"DefBfConflict_{uuid.uuid4().hex[:8]}",
+                "layout": [
+                    {"name": "head", "type": "uint", "offset": 0},
+                    {"name": "A", "base_type": "uint", "byte_offset": 4,
+                     "bit_offset": 0, "bit_size": 5},
+                    {"name": "B", "base_type": "uint", "byte_offset": 4,
+                     "bit_offset": 3, "bit_size": 4},
+                ],
+            },
+        )
+        assert response.status_code == 200
+        assert is_error_response(response.text)
+
 
 class TestClearStructField:
     """Test clear_struct_field — non-compacting field clear."""
