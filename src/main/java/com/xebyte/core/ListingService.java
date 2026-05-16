@@ -5,6 +5,7 @@ import ghidra.program.model.address.AddressIterator;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.address.GlobalNamespace;
 import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.Pointer;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.symbol.*;
@@ -886,6 +887,79 @@ public class ListingService {
 
     public Response listExternalLocations(int offset, int limit) {
         return listExternalLocations(offset, limit, null);
+    }
+
+    @McpTool(path = "/describe_address",
+            description = "Describe what is at an address in one call: defined data type, primary symbol name, size, xref count, and — for pointers — the recursively-resolved pointer target. Answers 'what is actually here?' without reconstructing it from raw read_memory bytes.",
+            category = "listing")
+    public Response describeAddress(
+            @Param(value = "address", paramType = "address",
+                   description = "Address in the program. Accepts 0x<hex> (default space) or "
+                               + "<space>:<hex> (e.g. mem:1000).") String addressStr,
+            @Param(value = "program", description = "Target program name (omit to use the active program — always specify when multiple programs are open)", defaultValue = "") String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+        if (addressStr == null || addressStr.isEmpty()) return Response.err("Address is required");
+
+        Address addr = ServiceUtils.parseAddress(program, addressStr);
+        if (addr == null) return Response.err(ServiceUtils.getLastParseError());
+
+        Listing listing = program.getListing();
+        SymbolTable symbolTable = program.getSymbolTable();
+        ReferenceManager refMgr = program.getReferenceManager();
+
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("address", addr.toString());
+
+        Symbol primary = symbolTable.getPrimarySymbol(addr);
+        data.put("symbol", primary != null ? primary.getName() : null);
+
+        Data definedData = listing.getDefinedDataAt(addr);
+        DataType dt = (definedData != null) ? definedData.getDataType() : null;
+        data.put("data_type", dt != null ? dt.getName() : null);
+        data.put("size", definedData != null ? definedData.getLength() : null);
+        data.put("xref_count", refMgr.getReferenceCountTo(addr));
+
+        Map<String, Object> pointerTarget = describePointerTarget(program, definedData);
+        if (pointerTarget != null) {
+            data.put("pointer_target", pointerTarget);
+        }
+
+        return Response.ok(data);
+    }
+
+    /**
+     * If {@code data} is a pointer, follow it — recursively through chained
+     * pointers, bounded to 8 hops — and describe the eventual pointee: its
+     * address, primary symbol, and defined data type. Returns null when
+     * {@code data} is not a pointer or its value is not an address.
+     */
+    private Map<String, Object> describePointerTarget(Program program, Data data) {
+        if (data == null || !(data.getDataType() instanceof Pointer)) return null;
+        Listing listing = program.getListing();
+        SymbolTable symbolTable = program.getSymbolTable();
+
+        Address target = null;
+        Data cur = data;
+        for (int hop = 0; hop < 8; hop++) {
+            Object val = cur.getValue();
+            if (!(val instanceof Address)) break;
+            target = (Address) val;
+            Data next = listing.getDefinedDataAt(target);
+            if (next == null || !(next.getDataType() instanceof Pointer)) break;
+            cur = next;
+        }
+        if (target == null) return null;
+
+        Map<String, Object> tgt = new LinkedHashMap<>();
+        tgt.put("address", target.toString());
+        Symbol s = symbolTable.getPrimarySymbol(target);
+        tgt.put("symbol", s != null ? s.getName() : null);
+        Data targetData = listing.getDefinedDataAt(target);
+        tgt.put("data_type", (targetData != null && targetData.getDataType() != null)
+                ? targetData.getDataType().getName() : null);
+        return tgt;
     }
 
     @McpTool(path = "/get_external_location", description = "Get external location details by address or DLL name", category = "listing")
