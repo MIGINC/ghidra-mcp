@@ -75,6 +75,28 @@ public class DataTypeService {
     }
 
     /**
+     * One entry in a {@code define_struct} layout array. {@code kind} is
+     * either explicit (from the JSON) or inferred: {@code bitfield} when
+     * {@code bit_size} is present, {@code gap} when {@code size} is present
+     * and {@code name} is absent, otherwise {@code field}.
+     */
+    private static class LayoutEntry {
+        String kind;        // "field" | "bitfield" | "gap"
+        String name;
+        String type;        // field type
+        String baseType;    // bitfield base type
+        String comment;     // bitfield comment (optional)
+        int index;          // position in the layout array, for error messages
+        int offset = -1;    // field/gap explicit byte offset (-1 = append)
+        int size = -1;      // gap byte size
+        int byteOffset = -1;
+        int bitOffset = -1;
+        int bitSize = -1;
+        int resolvedOffset = -1;  // assigned during non-packed planning
+        DataType resolvedType;    // field type, or bitfield base type
+    }
+
+    /**
      * Helper class to track field usage information
      */
     private static class FieldUsageInfo {
@@ -1909,6 +1931,302 @@ public class DataTypeService {
     }
 
     /**
+     * Build a complete structure from a single JSON layout: plain fields,
+     * nested structs, explicitly-placed bitfields, and gaps. The whole layout
+     * is declared at once, so there is no compaction and no
+     * create_struct + N×add_struct_bitfield + delete-rebuild cycle.
+     */
+    @McpTool(path = "/define_struct", method = "POST",
+            description = "Build a complete structure from a single JSON layout in one call: plain fields, nested structs, explicitly-placed bitfields, and gaps. Sidesteps the create_struct + N×add_struct_bitfield + delete-rebuild dance. Each layout entry's kind is inferred (field / bitfield / gap) or set explicitly with \"kind\".",
+            category = "datatype")
+    public Response defineStruct(
+            @Param(value = "name", source = ParamSource.BODY,
+                   description = "New structure type name, e.g. UnitAny") String name,
+            @Param(value = "layout", source = ParamSource.BODY, fieldsJson = true,
+                   description = "JSON array of layout entries. field: {name,type,offset?} (offset omitted = append; type may be any resolvable type or existing struct). bitfield (inferred when bit_size present): {name,base_type,byte_offset,bit_offset,bit_size,comment?}. gap (inferred when size present and no name): {offset?,size}. Holes left between explicit offsets stay undefined automatically.") String layoutJson,
+            @Param(value = "packed", source = ParamSource.BODY, defaultValue = "false",
+                   description = "Enable structure packing. When true, entries append in order and Ghidra computes offsets; explicit offset/byte_offset and gap entries are rejected.") boolean packed,
+            @Param(value = "program", description = "Target program name", defaultValue = "") String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+
+        if (name == null || name.isEmpty()) return Response.err("Structure name is required");
+        if (layoutJson == null || layoutJson.isEmpty()) {
+            return Response.err("layout is required (a JSON array of entry objects)");
+        }
+
+        List<LayoutEntry> entries;
+        try {
+            entries = parseDefineStructLayout(layoutJson);
+        } catch (IllegalArgumentException e) {
+            return Response.err(e.getMessage());
+        }
+        if (entries.isEmpty()) return Response.err("layout must contain at least one entry");
+
+        DataTypeManager dtm = program.getDataTypeManager();
+        if (dtm.getDataType("/" + name) != null) {
+            return Response.err("Structure with name '" + name + "' already exists");
+        }
+
+        // Resolve types and run kind-independent validation off-transaction.
+        for (LayoutEntry e : entries) {
+            if ("field".equals(e.kind)) {
+                if (e.name == null || e.name.isEmpty() || e.type == null || e.type.isEmpty()) {
+                    return Response.err("layout entry " + e.index + " (field) requires name and type");
+                }
+                DataType dt = ServiceUtils.resolveDataType(dtm, e.type);
+                if (dt == null) {
+                    return Response.err("layout entry " + e.index + ": unknown type '" + e.type + "'");
+                }
+                if (dt.getLength() <= 0) {
+                    return Response.err("layout entry " + e.index + ": type '" + e.type
+                        + "' has no fixed size and cannot be placed");
+                }
+                e.resolvedType = dt;
+                e.name = NamingConventions.applyStructFieldNamingPolicy(e.name, e.type);
+            } else if ("bitfield".equals(e.kind)) {
+                if (e.name == null || e.name.isEmpty()) {
+                    return Response.err("layout entry " + e.index + " (bitfield) requires name");
+                }
+                if (!BITFIELD_NAME_PATTERN.matcher(e.name).matches()) {
+                    return Response.err("layout entry " + e.index + ": invalid bitfield name '"
+                        + e.name + "' — must be a valid identifier");
+                }
+                if (e.baseType == null || e.baseType.isEmpty()) {
+                    return Response.err("layout entry " + e.index + " (bitfield) requires base_type");
+                }
+                if (e.bitSize < 1) {
+                    return Response.err("layout entry " + e.index + " (bitfield) requires bit_size >= 1");
+                }
+                DataType base = ServiceUtils.resolveDataType(dtm, e.baseType);
+                if (base == null) {
+                    return Response.err("layout entry " + e.index + ": unknown base_type '" + e.baseType + "'");
+                }
+                DataType probe = base;
+                int guard = 0;
+                while (probe instanceof TypeDef && guard++ < 64) {
+                    probe = ((TypeDef) probe).getBaseDataType();
+                }
+                if (!(probe instanceof AbstractIntegerDataType)) {
+                    return Response.err("layout entry " + e.index + ": base_type '" + e.baseType
+                        + "' is not an integer type; bitfields require an integer base type");
+                }
+                if (base.getLength() <= 0) {
+                    return Response.err("layout entry " + e.index + ": base_type '" + e.baseType
+                        + "' has no fixed storage size");
+                }
+                int maxBits = base.getLength() * 8;
+                if (e.bitSize > maxBits) {
+                    return Response.err("layout entry " + e.index + ": bit_size " + e.bitSize
+                        + " exceeds base type width (" + maxBits + " bits)");
+                }
+                e.resolvedType = base;
+            } else if ("gap".equals(e.kind)) {
+                if (e.size < 1) {
+                    return Response.err("layout entry " + e.index + " (gap) requires size >= 1");
+                }
+            } else {
+                return Response.err("layout entry " + e.index + ": unknown kind '" + e.kind
+                    + "' (expected field, bitfield, or gap)");
+            }
+        }
+
+        if (packed) {
+            return defineStructPacked(program, dtm, name, entries);
+        }
+
+        // Non-packed: bitfields need explicit placement; assign offsets with
+        // an append cursor for entries that omit an explicit offset.
+        for (LayoutEntry e : entries) {
+            if ("bitfield".equals(e.kind)) {
+                if (e.byteOffset < 0) {
+                    return Response.err("layout entry " + e.index
+                        + " (bitfield) requires byte_offset >= 0 when packed=false");
+                }
+                if (e.bitOffset < 0) {
+                    return Response.err("layout entry " + e.index
+                        + " (bitfield) requires bit_offset >= 0 when packed=false");
+                }
+                int maxBits = e.resolvedType.getLength() * 8;
+                if (e.bitOffset + e.bitSize > maxBits) {
+                    return Response.err("layout entry " + e.index + ": bit_offset " + e.bitOffset
+                        + " + bit_size " + e.bitSize + " exceeds base type width (" + maxBits + " bits)");
+                }
+            }
+        }
+        int cursor = 0;
+        for (LayoutEntry e : entries) {
+            if ("field".equals(e.kind)) {
+                e.resolvedOffset = (e.offset >= 0) ? e.offset : cursor;
+                cursor = Math.max(cursor, e.resolvedOffset + e.resolvedType.getLength());
+            } else if ("bitfield".equals(e.kind)) {
+                e.resolvedOffset = e.byteOffset;
+                cursor = Math.max(cursor, e.byteOffset + e.resolvedType.getLength());
+            } else { // gap
+                e.resolvedOffset = (e.offset >= 0) ? e.offset : cursor;
+                cursor = Math.max(cursor, e.resolvedOffset + e.size);
+            }
+        }
+        final int totalSize = cursor;
+        if (totalSize <= 0) {
+            return Response.err("computed struct size is zero — layout has no placeable entries");
+        }
+
+        // Overlap pre-check: no two non-bitfield byte ranges (fields/gaps) may
+        // overlap, and no bitfield byte region may overlap a field/gap.
+        // Bitfield-vs-bitfield byte overlap is allowed (shared storage word) —
+        // a bit-range conflict inside a shared word is caught by the
+        // post-insert growth guard below.
+        for (int i = 0; i < entries.size(); i++) {
+            LayoutEntry a = entries.get(i);
+            int[] ra = layoutByteRange(a);
+            for (int j = i + 1; j < entries.size(); j++) {
+                LayoutEntry b = entries.get(j);
+                if ("bitfield".equals(a.kind) && "bitfield".equals(b.kind)) continue;
+                int[] rb = layoutByteRange(b);
+                if (ra[0] < rb[1] && rb[0] < ra[1]) {
+                    return Response.err("layout entries " + a.index + " and " + b.index
+                        + " overlap (byte ranges [" + ra[0] + "," + ra[1] + ") and ["
+                        + rb[0] + "," + rb[1] + "))");
+                }
+            }
+        }
+
+        AtomicReference<Response> responseRef = new AtomicReference<>();
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Define structure: " + name);
+                boolean committed = false;
+                try {
+                    ghidra.program.model.data.StructureDataType struct =
+                        new ghidra.program.model.data.StructureDataType(name, totalSize);
+                    // Plain fields first — they overlay undefined bytes in place.
+                    for (LayoutEntry e : entries) {
+                        if ("field".equals(e.kind)) {
+                            struct.replaceAtOffset(e.resolvedOffset, e.resolvedType,
+                                e.resolvedType.getLength(), e.name, "");
+                        }
+                    }
+                    // Then bitfields. insertBitFieldAt into free undefined space
+                    // does not grow the struct; a bit-range conflict relocates
+                    // the bitfield and grows it — detect that and roll back.
+                    for (LayoutEntry e : entries) {
+                        if (!"bitfield".equals(e.kind)) continue;
+                        int byteWidth = e.resolvedType.getLength();
+                        int before = struct.getLength();
+                        struct.insertBitFieldAt(e.byteOffset, byteWidth, e.bitOffset,
+                            e.resolvedType, e.bitSize, e.name,
+                            e.comment != null ? e.comment : "");
+                        int expected = Math.max(before, e.byteOffset + byteWidth);
+                        if (struct.getLength() > expected) {
+                            responseRef.set(Response.err("bitfield '" + e.name + "' (layout entry "
+                                + e.index + ") could not be placed at byte_offset " + e.byteOffset
+                                + " bit_offset " + e.bitOffset + ": the bit range conflicts with "
+                                + "another bitfield in that storage word"));
+                            return;  // committed stays false -> rollback
+                        }
+                    }
+                    DataType created = dtm.addDataType(struct, null);
+                    committed = true;
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("success", true);
+                    data.put("struct", name);
+                    data.put("length", created.getLength());
+                    data.put("entry_count", entries.size());
+                    data.put("packed", false);
+                    responseRef.set(Response.ok(data));
+                } catch (Throwable t) {
+                    String msg = t.getMessage() != null ? t.getMessage() : t.toString();
+                    responseRef.set(Response.err("Error defining structure: " + msg));
+                    Msg.error(this, "Error defining structure", t);
+                } finally {
+                    program.endTransaction(tx, committed);
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            return Response.err("Failed to define structure on Swing thread: " + e.getMessage());
+        }
+        program.flushEvents();
+        Response r = responseRef.get();
+        return r != null ? r : Response.err("define_struct produced no response");
+    }
+
+    /** Byte range [start, end) occupied by a layout entry. */
+    private static int[] layoutByteRange(LayoutEntry e) {
+        if ("bitfield".equals(e.kind)) {
+            return new int[]{e.byteOffset, e.byteOffset + e.resolvedType.getLength()};
+        }
+        if ("field".equals(e.kind)) {
+            return new int[]{e.resolvedOffset, e.resolvedOffset + e.resolvedType.getLength()};
+        }
+        return new int[]{e.resolvedOffset, e.resolvedOffset + e.size}; // gap
+    }
+
+    /**
+     * Packed variant of {@code define_struct}: entries append in order and
+     * Ghidra computes offsets. Explicit offsets/byte_offset and gap entries
+     * are rejected — they are meaningless under automatic packing.
+     */
+    private Response defineStructPacked(Program program, DataTypeManager dtm,
+                                        String name, List<LayoutEntry> entries) {
+        for (LayoutEntry e : entries) {
+            if ("gap".equals(e.kind)) {
+                return Response.err("layout entry " + e.index
+                    + ": gap entries are not allowed when packed=true");
+            }
+            if ("field".equals(e.kind) && e.offset >= 0) {
+                return Response.err("layout entry " + e.index
+                    + ": explicit offset is not allowed when packed=true");
+            }
+            if ("bitfield".equals(e.kind) && e.byteOffset >= 0) {
+                return Response.err("layout entry " + e.index
+                    + ": explicit byte_offset is not allowed when packed=true");
+            }
+        }
+        AtomicReference<Response> responseRef = new AtomicReference<>();
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Define packed structure: " + name);
+                boolean committed = false;
+                try {
+                    ghidra.program.model.data.StructureDataType struct =
+                        new ghidra.program.model.data.StructureDataType(name, 0);
+                    struct.setPackingEnabled(true);
+                    for (LayoutEntry e : entries) {
+                        if ("field".equals(e.kind)) {
+                            struct.add(e.resolvedType, e.resolvedType.getLength(), e.name, "");
+                        } else { // bitfield
+                            struct.addBitField(e.resolvedType, e.bitSize, e.name,
+                                e.comment != null ? e.comment : "");
+                        }
+                    }
+                    DataType created = dtm.addDataType(struct, null);
+                    committed = true;
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("success", true);
+                    data.put("struct", name);
+                    data.put("length", created.getLength());
+                    data.put("entry_count", entries.size());
+                    data.put("packed", true);
+                    responseRef.set(Response.ok(data));
+                } catch (Throwable t) {
+                    String msg = t.getMessage() != null ? t.getMessage() : t.toString();
+                    responseRef.set(Response.err("Error defining packed structure: " + msg));
+                    Msg.error(this, "Error defining packed structure", t);
+                } finally {
+                    program.endTransaction(tx, committed);
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            return Response.err("Failed to define packed structure on Swing thread: " + e.getMessage());
+        }
+        program.flushEvents();
+        Response r = responseRef.get();
+        return r != null ? r : Response.err("define_struct produced no response");
+    }
+
+    /**
      * Move a data type to a different category
      */
     @McpTool(path = "/move_data_type_to_category", method = "POST", description = "Move data type to category", category = "datatype")
@@ -2890,6 +3208,65 @@ public class DataTypeService {
      * Parse fields JSON into FieldDefinition objects using robust JSON parsing
      * Supports array format: [{"name":"field1","type":"uint"}, {"name":"field2","type":"void*"}]
      */
+    /** Parse {@code s} as a decimal int, returning {@code dflt} on null/garbage. */
+    private static int parseIntOr(String s, int dflt) {
+        if (s == null) return dflt;
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (NumberFormatException e) {
+            return dflt;
+        }
+    }
+
+    /**
+     * Parse a {@code define_struct} layout JSON array into classified
+     * {@link LayoutEntry} objects. Reuses {@link #parseFieldJsonArray} for
+     * brace-matched object splitting and {@link #parseJsonKeyValues} for
+     * key/value extraction. Throws {@link IllegalArgumentException} with a
+     * caller-facing message on malformed JSON.
+     */
+    private List<LayoutEntry> parseDefineStructLayout(String layoutJson) {
+        String json = layoutJson.trim();
+        if (!json.startsWith("[") || !json.endsWith("]")) {
+            throw new IllegalArgumentException(
+                "layout must be a JSON array of entry objects, e.g. "
+                + "[{\"name\":\"dwId\",\"type\":\"uint\",\"offset\":0},"
+                + "{\"name\":\"FLAGS\",\"base_type\":\"uint\",\"byte_offset\":4,"
+                + "\"bit_offset\":0,\"bit_size\":3}]");
+        }
+        json = json.substring(1, json.length() - 1).trim();
+        List<String> objs = parseFieldJsonArray(json);
+        List<LayoutEntry> entries = new ArrayList<>();
+        int idx = 0;
+        for (String obj : objs) {
+            Map<String, String> kv = parseJsonKeyValues(obj);
+            LayoutEntry e = new LayoutEntry();
+            e.index = idx++;
+            e.name = firstOf(kv, "name", "field_name", "fieldName", "field");
+            e.type = firstOf(kv, "type", "field_type", "fieldType", "data_type", "dataType");
+            e.baseType = firstOf(kv, "base_type", "baseType");
+            e.kind = firstOf(kv, "kind");
+            e.comment = firstOf(kv, "comment");
+            e.offset = parseIntOr(firstOf(kv, "offset", "field_offset", "fieldOffset", "off"), -1);
+            e.byteOffset = parseIntOr(firstOf(kv, "byte_offset", "byteOffset"), -1);
+            e.bitOffset = parseIntOr(firstOf(kv, "bit_offset", "bitOffset"), -1);
+            e.bitSize = parseIntOr(firstOf(kv, "bit_size", "bitSize"), -1);
+            e.size = parseIntOr(firstOf(kv, "size"), -1);
+            if (e.kind == null || e.kind.isEmpty()) {
+                if (e.bitSize >= 0) {
+                    e.kind = "bitfield";
+                } else if (e.size >= 0 && (e.name == null || e.name.isEmpty())) {
+                    e.kind = "gap";
+                } else {
+                    e.kind = "field";
+                }
+            }
+            e.kind = e.kind.toLowerCase();
+            entries.add(e);
+        }
+        return entries;
+    }
+
     /**
      * Build a multi-line error message that explains what the {@code fields}
      * parameter is supposed to look like. Used by {@code create_struct} and
