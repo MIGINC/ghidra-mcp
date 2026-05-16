@@ -1,7 +1,7 @@
 {
   "version": "5.10.0",
   "description": "GhidraMCP REST API Endpoint Specification",
-  "total_endpoints": 245,
+  "total_endpoints": 248,
   "categories": {
     "listing": "List program data",
     "getter": "Get specific data",
@@ -30,6 +30,22 @@
         "program"
       ],
       "description": "Attach one or more tags to a function. Tags are comma-separated and will be auto-created if they do not already exist."
+    },
+    {
+      "path": "/add_struct_bitfield",
+      "method": "POST",
+      "category": "datatype",
+      "params": [
+        "struct_name",
+        "base_type",
+        "byte_offset",
+        "bit_offset",
+        "bit_size",
+        "name",
+        "comment",
+        "program"
+      ],
+      "description": "Add an explicitly-placed bitfield member to a non-packed structure"
     },
     {
       "path": "/add_struct_field",
@@ -454,6 +470,17 @@
       "description": "Clear flow override"
     },
     {
+      "path": "/clear_struct_field",
+      "method": "POST",
+      "category": "datatype",
+      "params": [
+        "struct_name",
+        "field_name",
+        "program"
+      ],
+      "description": "Clear a structure field to undefined bytes WITHOUT shifting later fields. Unlike remove_struct_field (which compacts), this reserves the field's byte region so a bitfield can later be placed there with add_struct_bitfield."
+    },
+    {
       "path": "/clone_data_type",
       "method": "POST",
       "category": "datatype",
@@ -833,6 +860,18 @@
       "description": "Decompile function"
     },
     {
+      "path": "/define_struct",
+      "method": "POST",
+      "category": "datatype",
+      "params": [
+        "name",
+        "layout",
+        "packed",
+        "program"
+      ],
+      "description": "Build a complete structure from a single JSON layout in one call: plain fields, nested structs, explicitly-placed bitfields, and gaps. Sidesteps the create_struct + N×add_struct_bitfield + delete-rebuild dance. Each layout entry's kind is inferred (field / bitfield / gap) or set explicitly with \"kind\"."
+    },
+    {
       "path": "/delete_bookmark",
       "method": "POST",
       "category": "comment",
@@ -901,6 +940,16 @@
         "projectPath"
       ],
       "description": "Delete a Ghidra project"
+    },
+    {
+      "path": "/describe_address",
+      "method": "GET",
+      "category": "listing",
+      "params": [
+        "address",
+        "program"
+      ],
+      "description": "Describe what is at an address in one call: defined data type, primary symbol name, size, xref count, and — for pointers — the recursively-resolved pointer target. Answers 'what is actually here?' without reconstructing it from raw read_memory bytes."
     },
     {
       "path": "/detect_array_bounds",
@@ -2613,22 +2662,6 @@
         "program"
       ],
       "description": "Validate function prototype"
-    },
-    {
-      "path": "/add_struct_bitfield",
-      "method": "POST",
-      "category": "datatype",
-      "params": [
-        "struct_name",
-        "base_type",
-        "byte_offset",
-        "bit_offset",
-        "bit_size",
-        "name",
-        "comment",
-        "program"
-      ],
-      "description": "Add an explicitly-placed bitfield member to a non-packed structure"
     }
   ]
 }

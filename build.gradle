@@ -91,6 +91,11 @@ dependencies {
 // classes under Java 21 — mirrors the maven-surefire argLine in pom.xml.
 test {
     jvmArgs '-Dnet.bytebuddy.experimental=true'
+    // Forward the `regenerate` flag to the test JVM so RegenerateEndpointsJson
+    // can be triggered via Gradle: -Pregenerate=true (mirrors Maven's -Dregenerate=true).
+    if (project.hasProperty('regenerate')) {
+        systemProperty 'regenerate', project.property('regenerate')
+    }
 }
 
 // ---------------------------------------------------------------------------
