@@ -535,13 +535,19 @@ public class ListingService {
         Set<Address> emittedAddrs = new HashSet<>();
         List<String> globals = new ArrayList<>();
 
-        // Pass 1: iterate the global namespace, emit symbols that match
-        // the filter axes (skipping code labels and functions as before).
-        Namespace globalNamespace = program.getGlobalNamespace();
-        SymbolIterator symbols = symbolTable.getSymbols(globalNamespace);
+        // Pass 1: iterate every symbol (including dynamically-generated ones
+        // such as PTR_*/DAT_* pointer labels — getSymbols(globalNamespace)
+        // excludes those, which is why name_substring searches against them
+        // previously returned empty), filtered to global scope. All existing
+        // gates below (code-address, section, axis, min_xrefs, substring) are
+        // preserved unchanged.
+        SymbolIterator symbols = symbolTable.getAllSymbols(true);
         while (symbols.hasNext()) {
             Symbol symbol = symbols.next();
             if (symbol.getSymbolType() == SymbolType.FUNCTION) {
+                continue;
+            }
+            if (!symbol.isGlobal()) {
                 continue;
             }
             Address symAddr = symbol.getAddress();
