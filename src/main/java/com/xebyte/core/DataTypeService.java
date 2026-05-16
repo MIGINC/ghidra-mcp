@@ -1821,6 +1821,81 @@ public class DataTypeService {
     }
 
     /**
+     * Clear a structure field to undefined bytes WITHOUT shifting later
+     * fields. Unlike {@code remove_struct_field} (which compacts and shifts
+     * later members down), this reserves the field's byte region so a
+     * bitfield can later be placed there with {@code add_struct_bitfield}.
+     */
+    @McpTool(path = "/clear_struct_field", method = "POST",
+            description = "Clear a structure field to undefined bytes WITHOUT shifting later fields. Unlike remove_struct_field (which compacts), this reserves the field's byte region so a bitfield can later be placed there with add_struct_bitfield.",
+            category = "datatype")
+    public Response clearStructField(
+            @Param(value = "struct_name", source = ParamSource.BODY) String structName,
+            @Param(value = "field_name", source = ParamSource.BODY) String fieldName,
+            @Param(value = "program", description = "Target program name", defaultValue = "") String programName) {
+        ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+        if (pe.hasError()) return pe.error();
+        Program program = pe.program();
+        if (structName == null || structName.isEmpty()) return Response.err("Structure name is required");
+        if (fieldName == null || fieldName.isEmpty()) return Response.err("Field name is required");
+
+        AtomicReference<Response> responseRef = new AtomicReference<>();
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Clear struct field");
+                boolean committed = false;
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    DataType dataType = ServiceUtils.findDataTypeByNameInAllCategories(dtm, structName);
+                    if (dataType == null) {
+                        responseRef.set(Response.err("Structure not found: " + structName));
+                        return;
+                    }
+                    if (!(dataType instanceof Structure)) {
+                        responseRef.set(Response.err("Data type '" + structName + "' is not a structure"));
+                        return;
+                    }
+                    Structure struct = (Structure) dataType;
+                    int targetOrdinal = -1;
+                    int clearedOffset = -1;
+                    int clearedLength = -1;
+                    for (DataTypeComponent component : struct.getDefinedComponents()) {
+                        if (fieldName.equals(component.getFieldName())) {
+                            targetOrdinal = component.getOrdinal();
+                            clearedOffset = component.getOffset();
+                            clearedLength = component.getLength();
+                            break;
+                        }
+                    }
+                    if (targetOrdinal == -1) {
+                        responseRef.set(Response.err("Field '" + fieldName
+                            + "' not found in structure '" + structName + "'"));
+                        return;
+                    }
+                    struct.clearComponent(targetOrdinal);
+                    committed = true;
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("success", true);
+                    data.put("struct", structName);
+                    data.put("field", fieldName);
+                    data.put("cleared_offset", clearedOffset);
+                    data.put("cleared_length", clearedLength);
+                    data.put("struct_length", struct.getLength());
+                    responseRef.set(Response.ok(data));
+                } catch (Exception e) {
+                    responseRef.set(Response.err("Error clearing struct field: " + e.getMessage()));
+                } finally {
+                    program.endTransaction(tx, committed);
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            return Response.err("Failed to execute struct field clear on Swing thread: " + e.getMessage());
+        }
+        Response r = responseRef.get();
+        return r != null ? r : Response.err("Struct field clear produced no response");
+    }
+
+    /**
      * Move a data type to a different category
      */
     @McpTool(path = "/move_data_type_to_category", method = "POST", description = "Move data type to category", category = "datatype")
