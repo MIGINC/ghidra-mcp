@@ -559,6 +559,11 @@ public class ListingService {
             Address symAddr = symbol.getAddress();
             if (symAddr == null) continue;
 
+            // A single address can carry multiple symbols (primary + secondary
+            // labels); getAllSymbols(true) surfaces them all. Emit each address
+            // at most once — skip any address Pass 1 has already emitted.
+            if (emittedAddrs.contains(symAddr)) continue;
+
             // Reject code-address symbols (branch targets, error handlers).
             Data definedData = listing.getDefinedDataAt(symAddr);
             if (definedData == null) {
