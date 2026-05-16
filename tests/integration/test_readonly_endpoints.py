@@ -793,3 +793,69 @@ class TestResponseFormats:
         assert response.status_code == 200
         # Should be non-empty
         assert len(response.text) > 0
+
+
+class TestDescribeAddressAndGlobalSearch:
+    """describe_address metadata + list_globals dynamic-symbol substring fix."""
+
+    @pytest.mark.requires_program
+    def test_describe_address_invalid(self, http_client):
+        """An unparseable address returns an error."""
+        response = http_client.get(
+            "/describe_address", params={"address": "0xZZZZZZZZ"}
+        )
+        assert response.status_code == 200
+        assert "error" in response.text.lower()
+
+    @pytest.mark.requires_program
+    def test_describe_address_returns_metadata(self, http_client):
+        """describe_address echoes address, xref_count, and the metadata keys.
+
+        Picks a real global address from list_globals so the test is binary-
+        agnostic.
+        """
+        globals_resp = http_client.get(
+            "/list_globals", params={"limit": 50, "filter": "defined"}
+        )
+        assert globals_resp.status_code == 200
+        addr = None
+        for line in globals_resp.text.splitlines():
+            if "@ " in line:
+                addr = line.split("@ ", 1)[1].split()[0]
+                break
+        if addr is None:
+            pytest.skip("no defined globals in the open program")
+        response = http_client.get("/describe_address", params={"address": addr})
+        assert response.status_code == 200
+        body = json.loads(response.text)
+        assert body["address"]
+        assert "data_type" in body
+        assert "symbol" in body
+        assert "size" in body
+        assert "xref_count" in body
+
+    @pytest.mark.requires_program
+    def test_list_globals_substring_hits_dynamic_symbols(self, http_client):
+        """name_substring against a dynamic PTR_/DAT_ label now returns it.
+
+        Regression for the root cause: Pass 1 used getSymbols(globalNamespace),
+        which excluded dynamic symbols.
+        """
+        globals_resp = http_client.get("/list_globals", params={"limit": 400})
+        assert globals_resp.status_code == 200
+        dynamic_line = None
+        for line in globals_resp.text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("PTR_", "DAT_")):
+                dynamic_line = stripped
+                break
+        if dynamic_line is None:
+            pytest.skip("no dynamic PTR_/DAT_ symbols in the open program")
+        symbol_name = dynamic_line.split()[0]
+        # Use a mid-name substring so the match exercises 'contains', not prefix.
+        substring = symbol_name[4:12] if len(symbol_name) > 12 else symbol_name
+        search = http_client.get(
+            "/list_globals", params={"limit": 400, "name_substring": substring}
+        )
+        assert search.status_code == 200
+        assert substring.lower() in search.text.lower()

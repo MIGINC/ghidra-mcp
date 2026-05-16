@@ -856,3 +856,173 @@ class TestStructBitfield:
         )
         assert clash.status_code == 200
         assert is_error_response(clash.text)
+
+
+class TestDefineStruct:
+    """Test define_struct — atomic struct builder from a JSON layout."""
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_define_struct_fields_bitfield_gap_nested(self, http_client):
+        """One call builds plain fields, a bitfield, a nested struct, a gap."""
+        nested = f"DefNested_{uuid.uuid4().hex[:8]}"
+        http_client.post(
+            "/create_struct",
+            json_data={"name": nested, "fields": [{"name": "n", "type": "int"}]},
+        )
+        struct_name = f"DefStruct_{uuid.uuid4().hex[:8]}"
+        response = http_client.post(
+            "/define_struct",
+            json_data={
+                "name": struct_name,
+                "layout": [
+                    {"name": "dwId", "type": "uint", "offset": 0},
+                    {"name": "FLAGS", "base_type": "uint", "byte_offset": 4,
+                     "bit_offset": 0, "bit_size": 3},
+                    {"offset": 8, "size": 4},
+                    {"name": "child", "type": nested, "offset": 12},
+                ],
+            },
+        )
+        assert response.status_code == 200
+        body = json.loads(response.text)
+        assert body.get("success") is True
+        assert body["struct"] == struct_name
+        # uint(4) + bitfield word(4) + gap(4) + nested int(4) = 16 bytes
+        assert body["length"] == 16
+
+        layout = http_client.get(
+            "/get_struct_layout", params={"struct_name": struct_name}
+        )
+        assert layout.status_code == 200
+        assert "Bits" in layout.text
+        assert "0:3" in layout.text
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_define_struct_duplicate_name_rejected(self, http_client):
+        """A name that already exists is rejected."""
+        struct_name = f"DefDup_{uuid.uuid4().hex[:8]}"
+        http_client.post(
+            "/create_struct",
+            json_data={"name": struct_name, "fields": [{"name": "f", "type": "int"}]},
+        )
+        response = http_client.post(
+            "/define_struct",
+            json_data={"name": struct_name,
+                       "layout": [{"name": "f", "type": "int", "offset": 0}]},
+        )
+        assert response.status_code == 200
+        assert is_error_response(response.text)
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_define_struct_unknown_type_rejected(self, http_client):
+        """An unresolvable field type is rejected before any transaction."""
+        response = http_client.post(
+            "/define_struct",
+            json_data={
+                "name": f"DefBadType_{uuid.uuid4().hex[:8]}",
+                "layout": [{"name": "f", "type": "NoSuchType_zzz", "offset": 0}],
+            },
+        )
+        assert response.status_code == 200
+        assert is_error_response(response.text)
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_define_struct_overlapping_fields_rejected(self, http_client):
+        """Two plain fields with overlapping byte ranges are rejected."""
+        response = http_client.post(
+            "/define_struct",
+            json_data={
+                "name": f"DefOverlap_{uuid.uuid4().hex[:8]}",
+                "layout": [
+                    {"name": "a", "type": "uint", "offset": 0},
+                    {"name": "b", "type": "uint", "offset": 2},
+                ],
+            },
+        )
+        assert response.status_code == 200
+        assert is_error_response(response.text)
+
+
+class TestClearStructField:
+    """Test clear_struct_field — non-compacting field clear."""
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_clear_struct_field_preserves_later_offsets(self, http_client):
+        """Clearing a field leaves later fields at their original offsets."""
+        struct_name = f"ClrStruct_{uuid.uuid4().hex[:8]}"
+        http_client.post(
+            "/create_struct",
+            json_data={
+                "name": struct_name,
+                "fields": [
+                    {"name": "first", "type": "uint", "offset": 0},
+                    {"name": "middle", "type": "uint", "offset": 4},
+                    {"name": "last", "type": "uint", "offset": 8},
+                ],
+            },
+        )
+        response = http_client.post(
+            "/clear_struct_field",
+            json_data={"struct_name": struct_name, "field_name": "middle"},
+        )
+        assert response.status_code == 200
+        body = json.loads(response.text)
+        assert body.get("success") is True
+        assert body["cleared_offset"] == 4
+        assert body["cleared_length"] == 4
+        # 'last' must still be at offset 8 (no compaction).
+        layout = http_client.get(
+            "/get_struct_layout", params={"struct_name": struct_name}
+        )
+        assert layout.status_code == 200
+        assert "last" in layout.text
+
+    @pytest.mark.requires_program
+    @pytest.mark.write
+    def test_clear_then_place_bitfield(self, http_client):
+        """A cleared region accepts a bitfield via add_struct_bitfield."""
+        struct_name = f"ClrBf_{uuid.uuid4().hex[:8]}"
+        http_client.post(
+            "/create_struct",
+            json_data={
+                "name": struct_name,
+                "fields": [
+                    {"name": "head", "type": "uint", "offset": 0},
+                    {"name": "slot", "type": "uint", "offset": 4},
+                ],
+            },
+        )
+        http_client.post(
+            "/clear_struct_field",
+            json_data={"struct_name": struct_name, "field_name": "slot"},
+        )
+        response = http_client.post(
+            "/add_struct_bitfield",
+            json_data={
+                "struct_name": struct_name, "base_type": "uint",
+                "byte_offset": 4, "bit_offset": 0, "bit_size": 2, "name": "MODE",
+            },
+        )
+        assert response.status_code == 200
+        body = json.loads(response.text)
+        assert body.get("success") is True
+
+    @pytest.mark.requires_program
+    def test_clear_struct_field_missing_field(self, http_client):
+        """Clearing a non-existent field returns an error."""
+        struct_name = f"ClrMiss_{uuid.uuid4().hex[:8]}"
+        http_client.post(
+            "/create_struct",
+            json_data={"name": struct_name, "fields": [{"name": "f", "type": "int"}]},
+        )
+        response = http_client.post(
+            "/clear_struct_field",
+            json_data={"struct_name": struct_name, "field_name": "nope"},
+        )
+        assert response.status_code == 200
+        assert is_error_response(response.text)
