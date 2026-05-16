@@ -3226,12 +3226,28 @@ public class DataTypeService {
      * Parse fields JSON into FieldDefinition objects using robust JSON parsing
      * Supports array format: [{"name":"field1","type":"uint"}, {"name":"field2","type":"void*"}]
      */
-    /** Parse {@code s} as a decimal int, returning {@code dflt} on null/garbage. */
+    /**
+     * Parse {@code s} as an int, returning {@code dflt} on null/garbage.
+     * Also accepts a decimal-formatted integer such as {@code "8.0"} — the
+     * HTTP body parser widens JSON integers to doubles, so a number nested
+     * inside a fieldsJson blob can round-trip to {@code "8.0"} by the time it
+     * reaches this hand-parser.
+     */
     private static int parseIntOr(String s, int dflt) {
         if (s == null) return dflt;
+        String t = s.trim();
+        if (t.isEmpty()) return dflt;
         try {
-            return Integer.parseInt(s.trim());
+            return Integer.parseInt(t);
         } catch (NumberFormatException e) {
+            try {
+                double d = Double.parseDouble(t);
+                if (!Double.isInfinite(d) && !Double.isNaN(d) && d == Math.rint(d)) {
+                    return (int) d;
+                }
+            } catch (NumberFormatException ignored) {
+                // fall through to default
+            }
             return dflt;
         }
     }
@@ -3434,14 +3450,9 @@ public class DataTypeService {
             // Accept common alternative key names for flexibility
             name = firstOf(keyValues, "name", "field_name", "fieldName", "field");
             type = firstOf(keyValues, "type", "field_type", "fieldType", "data_type", "dataType");
-            String offsetStr = firstOf(keyValues, "offset", "field_offset", "fieldOffset", "off");
-            if (offsetStr != null) {
-                try {
-                    offset = Integer.parseInt(offsetStr);
-                } catch (NumberFormatException e) {
-                    // Keep offset as -1
-                }
-            }
+            // offset may arrive decimal-formatted ("0.0") when the body parser
+            // widens JSON integers to doubles — parseIntOr tolerates that.
+            offset = parseIntOr(firstOf(keyValues, "offset", "field_offset", "fieldOffset", "off"), -1);
 
         } catch (Exception e) {
             Msg.error(this, "Error parsing JSON object: " + e.getMessage());
